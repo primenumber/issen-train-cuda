@@ -217,7 +217,7 @@ __global__ void accum_l1(double* l1_acc, const double* y, size_t n) {
   l1_acc[index] = result;
 }
 
-void solve_impl(const Context& context, const CSRMatDev& mat,  const DnVec& a, const DnVec& b) {
+void solve_impl(const Context& context, const CSRMatDev& mat, const DnVec& a, const DnVec& b) {
   double alpha = 1.0;
   double beta = 0.0;
   auto external_buffer = [&] {
