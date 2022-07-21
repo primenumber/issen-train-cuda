@@ -44,4 +44,3 @@ struct CSRMat {
 };
 
 std::pair<CSRMat, std::vector<double>> generate_matrix(const DataSet&, const PatternIndexer&);
-CSRMat transpose(const CSRMat&);

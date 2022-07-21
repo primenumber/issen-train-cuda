@@ -128,18 +128,52 @@ struct Context {
   Stream stream;
 };
 
+struct transpose_tag {};
+
 struct CSRMatDev {
-  explicit CSRMatDev(const CSRMat& mat) {
-    CHECK_CUDA(cudaMalloc((void**)&weights, mat.weights.size() * sizeof(double)))
-    CHECK_CUDA(cudaMalloc((void**)&cols, mat.cols.size() * sizeof(int)))
-    CHECK_CUDA(cudaMalloc((void**)&row_starts, mat.row_starts.size() * sizeof(int)))
-    CHECK_CUDA(cudaMemcpy(weights, mat.weights.data(), mat.weights.size() * sizeof(double), cudaMemcpyHostToDevice))
-    CHECK_CUDA(cudaMemcpy(cols, mat.cols.data(), mat.cols.size() * sizeof(int), cudaMemcpyHostToDevice))
-    CHECK_CUDA(cudaMemcpy(row_starts, mat.row_starts.data(), mat.row_starts.size() * sizeof(int), cudaMemcpyHostToDevice))
-    CHECK_CUSPARSE(cusparseCreateCsr(&descr, mat.row_size(), mat.col_size(), mat.nnz(),
+  explicit CSRMatDev(const CSRMat& mat) : m(mat.row_size()), n(mat.col_size()), nnz(mat.nnz()) {
+    CHECK_CUDA(cudaMalloc((void**)&weights, nnz * sizeof(double)))
+    CHECK_CUDA(cudaMalloc((void**)&cols, nnz * sizeof(int)))
+    CHECK_CUDA(cudaMalloc((void**)&row_starts, (m + 1) * sizeof(int)))
+    CHECK_CUDA(cudaMemcpy(weights, mat.weights.data(), nnz * sizeof(double), cudaMemcpyHostToDevice))
+    CHECK_CUDA(cudaMemcpy(cols, mat.cols.data(), nnz * sizeof(int), cudaMemcpyHostToDevice))
+    CHECK_CUDA(cudaMemcpy(row_starts, mat.row_starts.data(), (m + 1) * sizeof(int), cudaMemcpyHostToDevice))
+    CHECK_CUSPARSE(cusparseCreateCsr(&descr, m, n, nnz,
           row_starts, cols, weights,
           CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I,
           CUSPARSE_INDEX_BASE_ZERO, CUDA_R_64F))
+  }
+  CSRMatDev(const Context& context, const CSRMatDev& mat, const transpose_tag) : m(mat.n), n(mat.m), nnz(mat.nnz) {
+    CHECK_CUDA(cudaMalloc((void**)&weights, nnz * sizeof(double)))
+    CHECK_CUDA(cudaMalloc((void**)&cols, nnz * sizeof(int)))
+    CHECK_CUDA(cudaMalloc((void**)&row_starts, (m + 1) * sizeof(int)))
+    size_t buffer_size = 0;
+    CHECK_CUSPARSE(cusparseCsr2cscEx2_bufferSize(context.handle.get(),
+          mat.m, mat.n, mat.nnz,
+          mat.weights, mat.row_starts, mat.cols,
+          weights, row_starts, cols,
+          CUDA_R_64F,
+          CUSPARSE_ACTION_NUMERIC,
+          CUSPARSE_INDEX_BASE_ZERO,
+          CUSPARSE_CSR2CSC_ALG2,
+          &buffer_size))
+    void *external_buffer;
+    CHECK_CUDA(cudaMalloc(&external_buffer, buffer_size))
+    CHECK_CUSPARSE(cusparseCsr2cscEx2(context.handle.get(),
+          mat.m, mat.n, mat.nnz,
+          mat.weights, mat.row_starts, mat.cols,
+          weights, row_starts, cols,
+          CUDA_R_64F,
+          CUSPARSE_ACTION_NUMERIC,
+          CUSPARSE_INDEX_BASE_ZERO,
+          CUSPARSE_CSR2CSC_ALG2,
+          external_buffer))
+    CHECK_CUDA(cudaStreamSynchronize(context.stream.get()))
+    CHECK_CUSPARSE(cusparseCreateCsr(&descr, m, n, nnz,
+          row_starts, cols, weights,
+          CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I,
+          CUSPARSE_INDEX_BASE_ZERO, CUDA_R_64F))
+    CHECK_CUDA(cudaFree(external_buffer))
   }
   ~CSRMatDev() {
     CHECK_CUSPARSE(cusparseDestroySpMat(descr))
@@ -147,6 +181,8 @@ struct CSRMatDev {
     CHECK_CUDA(cudaFree(cols))
     CHECK_CUDA(cudaFree(row_starts))
   }
+
+  size_t m, n, nnz;
   double *weights;
   int *cols;
   int *row_starts;
@@ -333,8 +369,16 @@ void solve_impl(const Context& context, const CSRMatDev& mat, const CSRMatDev& m
 }
 
 void solve(const Context& context, const CSRMat& mat, std::vector<double>& a, const std::vector<double>& b) {
+  using clock = std::chrono::high_resolution_clock;
+  const auto start = clock::now();
   CSRMatDev dev_mat(mat);
-  CSRMatDev dev_mat_tr(transpose(mat));
+  const auto mid = clock::now();
+  CSRMatDev dev_mat_tr(context, dev_mat, transpose_tag{});
+  const auto end = clock::now();
+  const auto duration1 = std::chrono::duration_cast<std::chrono::microseconds>(mid - start);
+  const auto duration2 = std::chrono::duration_cast<std::chrono::microseconds>(end - mid);
+  std::cerr << "Non-transpose: " << duration1.count() << "us" << std::endl;
+  std::cerr << "Transpose: " << duration2.count() << "us" << std::endl;
   DnVec dev_a(a);
   DnVec dev_b(b);
   solve_impl(context, dev_mat, dev_mat_tr, dev_a, dev_b);
