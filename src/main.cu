@@ -373,10 +373,10 @@ int main(int argc, char** argv) {
     }
     scores.push_back(0.0); // L2 normalization
     solve(context, mat, vec, scores);
-    //std::ofstream ofs(param.output_path + "/weight_" + std::to_string(mid));
-    //for (auto&& w : vec) {
-    //  ofs << w << "\n";
-    //}
+    std::ofstream ofs(param.output_path + "/weight_" + std::to_string(mid));
+    for (auto&& w : vec) {
+      ofs << w << "\n";
+    }
   }
   return 0;
 }
