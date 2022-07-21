@@ -61,6 +61,8 @@ std::tuple<std::vector<double>, std::vector<int>, double> generate_row(const Sta
   }
   std::vector<double> weights;
   std::vector<int> cols;
+  weights.reserve(compressed.size()+4);
+  cols.reserve(compressed.size()+4);
   for (auto&& [index, weight] : compressed) {
     weights.push_back(weight);
     cols.push_back(index);
@@ -77,7 +79,7 @@ std::tuple<std::vector<double>, std::vector<int>, double> generate_row(const Sta
   // constant
   weights.push_back(1.0);
   cols.push_back(indexer.pattern_size() + 3);
-  return {weights, cols, state.score};
+  return {std::move(weights), std::move(cols), state.score};
 }
 
 std::pair<CSRMat, std::vector<double>> generate_matrix(const DataSet& data_set, const PatternIndexer& indexer) {
@@ -107,7 +109,7 @@ std::pair<CSRMat, std::vector<double>> generate_matrix(const DataSet& data_set, 
   }
   mat.row_starts.push_back(std::size(mat.weights));
   vec.push_back(0);
-  return {mat, vec};
+  return {std::move(mat), std::move(vec)};
 }
 
 CSRMat transpose(const CSRMat& mat) {
@@ -132,9 +134,9 @@ CSRMat transpose(const CSRMat& mat) {
     }
   }
   return {
-    weights,
-    cols,
-    row_starts,
-    mat.row_size(),
+    std::move(weights),
+    std::move(cols),
+    std::move(row_starts),
+    std::move(mat.row_size()),
   };
 }
