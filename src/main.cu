@@ -217,7 +217,7 @@ __global__ void accum_l1(double* l1_acc, const double* y, size_t n) {
   l1_acc[index] = result;
 }
 
-void solve_impl(const Context& context, CSRMatDev& mat, const CSRMatDev& mat_tr, const DnVec& a, const DnVec& b) {
+void solve_impl(const Context& context, const CSRMatDev& mat,  const DnVec& a, const DnVec& b) {
   double alpha = 1.0;
   double beta = 0.0;
   auto external_buffer = [&] {
@@ -231,9 +231,9 @@ void solve_impl(const Context& context, CSRMatDev& mat, const CSRMatDev& mat_tr,
           CUDA_R_64F,
           CUSPARSE_SPMV_CSR_ALG1,
           &bufsize_forward))
-    CHECK_CUSPARSE(cusparseSpMV_bufferSize(context.handle.get(), CUSPARSE_OPERATION_NON_TRANSPOSE,
+    CHECK_CUSPARSE(cusparseSpMV_bufferSize(context.handle.get(), CUSPARSE_OPERATION_TRANSPOSE,
           &alpha,
-          mat_tr.descr,
+          mat.descr,
           b.descr,
           &beta,
           a.descr,
@@ -257,9 +257,9 @@ void solve_impl(const Context& context, CSRMatDev& mat, const CSRMatDev& mat_tr,
           external_buffer))
   };
   auto spmv_trans = [&] (auto&& v_in, auto&& v_out) {
-    CHECK_CUSPARSE(cusparseSpMV(context.handle.get(), CUSPARSE_OPERATION_NON_TRANSPOSE,
+    CHECK_CUSPARSE(cusparseSpMV(context.handle.get(), CUSPARSE_OPERATION_TRANSPOSE,
           &alpha,
-          mat_tr.descr,
+          mat.descr,
           v_in.descr,
           &beta,
           v_out.descr,
@@ -333,13 +333,9 @@ void solve_impl(const Context& context, CSRMatDev& mat, const CSRMatDev& mat_tr,
 
 void solve(const Context& context, const CSRMat& mat, std::vector<double>& a, const std::vector<double>& b) {
   CSRMatDev dev_mat(mat);
-  const auto dev_mat_tr = [&] {
-    const auto mat_tr = transpose(mat);
-    return CSRMatDev(mat_tr);
-  }();
   DnVec dev_a(a);
   DnVec dev_b(b);
-  solve_impl(context, dev_mat, dev_mat_tr, dev_a, dev_b);
+  solve_impl(context, dev_mat, dev_a, dev_b);
   CHECK_CUDA(cudaMemcpyAsync(a.data(), dev_a.data, a.size() * sizeof(double), cudaMemcpyDeviceToHost, context.stream.get()))
 }
 
