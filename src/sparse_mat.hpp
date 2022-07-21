@@ -19,11 +19,11 @@ struct PatternIndexer {
  public:
   explicit PatternIndexer(const std::vector<uint64_t>& masks);
   size_t get_index(size_t id, uint64_t player, uint64_t opponent) const {
-    uint64_t p_bit = bitboard::parallel_extract(player, masks.at(id));
-    uint64_t o_bit = bitboard::parallel_extract(opponent, masks.at(id));
-    size_t p_index = base_3.at(p_bit);
-    size_t o_index = base_3.at(o_bit);
-    return offsets.at(id) + p_index + 2 * o_index;
+    uint64_t p_bit = bitboard::parallel_extract(player, masks[id]);
+    uint64_t o_bit = bitboard::parallel_extract(opponent, masks[id]);
+    size_t p_index = base_3[p_bit];
+    size_t o_index = base_3[o_bit];
+    return offsets[id] + p_index + 2 * o_index;
   }
   size_t mask_size() const { return std::size(masks); }
   size_t pattern_size() const { return offsets.back(); }
@@ -43,5 +43,5 @@ struct CSRMat {
   size_t nnz() const { return weights.size(); }
 };
 
-CSRMat generate_matrix(const DataSet&, const PatternIndexer&);
+std::pair<CSRMat, std::vector<double>> generate_matrix(const DataSet&, const PatternIndexer&);
 CSRMat transpose(const CSRMat&);

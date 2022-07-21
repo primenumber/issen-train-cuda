@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <chrono>
 #include <fstream>
 #include <iostream>
 #include <iomanip>
@@ -362,12 +363,12 @@ int main(int argc, char** argv) {
         filtered.push_back(state);
       }
     }
-    const auto mat = generate_matrix(filtered, indexer);
-    std::vector<double> scores;
-    for (auto&& state : filtered) {
-      scores.push_back(state.score);
-    }
-    scores.push_back(0.0); // L2 normalization
+    using clock = std::chrono::high_resolution_clock;
+    const auto start = clock::now();
+    const auto [mat, scores] = generate_matrix(filtered, indexer);
+    const auto end = clock::now();
+    const auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+    std::cerr << duration.count() << "us" << std::endl;
     solve(context, mat, vec, scores);
     std::ofstream ofs(param.output_path + "/weight_" + std::to_string(mid));
     for (auto&& w : vec) {
