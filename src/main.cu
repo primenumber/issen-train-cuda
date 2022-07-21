@@ -64,16 +64,6 @@ Config load_config(const std::string& config_path) {
   };
 }
 
-struct State {
-  uint64_t player, opponent;
-  int32_t score;
-  size_t stone_count() const {
-    return bitboard::pop_count(player) + bitboard::pop_count(opponent);
-  }
-};
-
-using DataSet = std::vector<State>;
-
 DataSet load_dataset(const std::string& input_path) {
   std::ifstream ifs(input_path);
   size_t length;
@@ -89,123 +79,6 @@ DataSet load_dataset(const std::string& input_path) {
   }
   return result;
 }
-
-struct PatternIndexer {
- public:
-  explicit PatternIndexer(const std::vector<uint64_t>& masks) : masks(masks), offsets(std::size(masks) + 1), base_3() {
-    size_t largest_mask = 0;
-    for (auto&& mask : masks) {
-      largest_mask = std::max<size_t>(largest_mask, bitboard::pop_count(mask));
-    }
-    std::vector<size_t> pow_3(largest_mask + 1);
-    pow_3[0] = 1;
-    for (size_t i = 1; i <= largest_mask; ++i) {
-      pow_3[i] = 3 * pow_3[i-1];
-    }
-    offsets[0] = 0;
-    for (size_t i = 0; i < std::size(masks); ++i) {
-      offsets[i+1] = offsets[i] + pow_3[bitboard::pop_count(masks[i])];
-    }
-    size_t largest_pow2 = 1 << largest_mask;
-    base_3.resize(largest_pow2);
-    for (uint64_t i = 0; i < largest_pow2; ++i) {
-      size_t index = 0;
-      for (size_t j = 0; j < largest_mask; ++j) {
-        if ((i >> j) & 1) {
-          index += pow_3[j];
-        }
-      }
-      base_3[i] = index;
-    }
-  }
-  size_t get_index(size_t id, uint64_t player, uint64_t opponent) const {
-    uint64_t p_bit = bitboard::parallel_extract(player, masks.at(id));
-    uint64_t o_bit = bitboard::parallel_extract(opponent, masks.at(id));
-    size_t p_index = base_3.at(p_bit);
-    size_t o_index = base_3.at(o_bit);
-    return offsets.at(id) + p_index + 2 * o_index;
-  }
-  size_t mask_size() const { return std::size(masks); }
-  size_t pattern_size() const { return offsets.back(); }
-  std::vector<uint64_t> masks;
-  std::vector<size_t> offsets;
-  std::vector<size_t> base_3;
- private:
-};
-
-CSRMat generate_matrix(const DataSet& data_set, const PatternIndexer& indexer) {
-  CSRMat mat;
-  mat.col_size_ = indexer.pattern_size() + 3 + 1;
-  mat.row_starts.push_back(0);
-  for (auto&& state : data_set) {
-    std::vector<std::pair<int, double>> elements;
-    for (size_t id = 0; id < indexer.mask_size(); ++id) {
-      auto player = state.player;
-      auto opponent = state.opponent;
-      for (size_t i = 0; i < 4; ++i) {
-        const auto player_v = bitboard::flip_vertical(player);
-        const auto opponent_v = bitboard::flip_vertical(opponent);
-        auto index = indexer.get_index(id, player, opponent);
-        auto index_v = indexer.get_index(id, player_v, opponent_v);
-        elements.push_back({index, 1.0});
-        elements.push_back({index_v, 1.0});
-        player = bitboard::rot90(player);
-        opponent = bitboard::rot90(opponent);
-      }
-    }
-    std::sort(std::begin(elements), std::end(elements));
-    std::vector<std::pair<int, double>> compressed;
-    for (auto&& [index, weight] : elements) {
-      if (compressed.empty()) compressed.emplace_back(index, weight);
-      else if (compressed.back().first == index) {
-        compressed.back().second += weight;
-      } else {
-        compressed.emplace_back(index, weight);
-      }
-    }
-    for (auto&& [index, weight] : compressed) {
-      mat.weights.push_back(weight);
-      mat.cols.push_back(index);
-    }
-    auto player = state.player;
-    auto opponent = state.opponent;
-    // global
-    mat.weights.push_back(1.0 * bitboard::pop_count(bitboard::get_moves(player, opponent)));
-    mat.cols.push_back(indexer.pattern_size() + 0);
-    mat.weights.push_back(1.0 * bitboard::pop_count(bitboard::get_moves(opponent, player)));
-    mat.cols.push_back(indexer.pattern_size() + 1);
-    mat.weights.push_back(1.0 * bitboard::pop_count(~(player | opponent)));
-    mat.cols.push_back(indexer.pattern_size() + 2);
-    // constant
-    mat.weights.push_back(1.0);
-    mat.cols.push_back(indexer.pattern_size() + 3);
-    // end row
-    mat.row_starts.push_back(std::size(mat.weights));
-  }
-  return mat;
-}
-
-class MatDescr {
- public:
-  MatDescr() {
-    cusparseCreateMatDescr(&descr);
-  }
-  ~MatDescr() {
-    cusparseDestroyMatDescr(descr);
-  }
-  const cusparseMatDescr_t& get() const { return descr; }
-  cusparseMatDescr_t& get() { return descr; }
- private:
-  cusparseMatDescr_t descr;
-};
-
-struct BSRMatDev {
-  MatDescr descr;
-  size_t mb, nb, nnzb, block_size;
-  double* weights;
-  int* cols;
-  int* row_starts;
-};
 
 #define CHECK_CUDA(expr) \
 { \
@@ -254,125 +127,220 @@ struct Context {
   Stream stream;
 };
 
-constexpr int block_dim = 2;
-
-BSRMatDev convert_to_dev(const CSRMat& mat, const Context& context) {
-  MatDescr csr_descr;
-  CHECK_CUSPARSE(cusparseSetMatIndexBase(csr_descr.get(), CUSPARSE_INDEX_BASE_ZERO))
-  CHECK_CUSPARSE(cusparseSetMatType(csr_descr.get(), CUSPARSE_MATRIX_TYPE_GENERAL))
-  double *csr_weights;
-  int *csr_cols;
-  int *csr_row_starts;
-  CHECK_CUDA(cudaMalloc((void**)&csr_weights, mat.weights.size() * sizeof(double)))
-  CHECK_CUDA(cudaMalloc((void**)&csr_cols, mat.cols.size() * sizeof(int)))
-  CHECK_CUDA(cudaMalloc((void**)&csr_row_starts, mat.row_starts.size() * sizeof(int)))
-  CHECK_CUDA(cudaMemcpy(csr_weights, mat.weights.data(), mat.weights.size() * sizeof(double), cudaMemcpyHostToDevice))
-  CHECK_CUDA(cudaMemcpy(csr_cols, mat.cols.data(), mat.cols.size() * sizeof(int), cudaMemcpyHostToDevice))
-  CHECK_CUDA(cudaMemcpy(csr_row_starts, mat.row_starts.data(), mat.row_starts.size() * sizeof(int), cudaMemcpyHostToDevice))
-  int base, nnzb;
-  int mb = (mat.row_size() + block_dim - 1) / block_dim;
-  int *nnzTotalDevHostPtr = &nnzb;
-  BSRMatDev result;
-  CHECK_CUSPARSE(cusparseSetMatIndexBase(result.descr.get(), CUSPARSE_INDEX_BASE_ZERO))
-  CHECK_CUSPARSE(cusparseSetMatType(result.descr.get(), CUSPARSE_MATRIX_TYPE_GENERAL))
-  CHECK_CUDA(cudaMalloc((void**)&result.row_starts, (mb + 1) * sizeof(int)))
-  CHECK_CUSPARSE(cusparseXcsr2bsrNnz(context.handle.get(), CUSPARSE_DIRECTION_ROW, mat.row_size(), mat.col_size(),
-      csr_descr.get(), csr_row_starts, csr_cols, block_dim,
-      result.descr.get(), result.row_starts, nnzTotalDevHostPtr))
-      
-  if (nnzTotalDevHostPtr != nullptr) {
-    nnzb = *nnzTotalDevHostPtr;
-  } else {
-    CHECK_CUDA(cudaMemcpy(&nnzb, result.row_starts + mb, sizeof(int), cudaMemcpyDeviceToHost))
-    CHECK_CUDA(cudaMemcpy(&base, result.row_starts, sizeof(int), cudaMemcpyDeviceToHost))
-    nnzb -= base;
+struct CSRMatDev {
+  explicit CSRMatDev(const CSRMat& mat) {
+    CHECK_CUDA(cudaMalloc((void**)&weights, mat.weights.size() * sizeof(double)))
+    CHECK_CUDA(cudaMalloc((void**)&cols, mat.cols.size() * sizeof(int)))
+    CHECK_CUDA(cudaMalloc((void**)&row_starts, mat.row_starts.size() * sizeof(int)))
+    CHECK_CUDA(cudaMemcpy(weights, mat.weights.data(), mat.weights.size() * sizeof(double), cudaMemcpyHostToDevice))
+    CHECK_CUDA(cudaMemcpy(cols, mat.cols.data(), mat.cols.size() * sizeof(int), cudaMemcpyHostToDevice))
+    CHECK_CUDA(cudaMemcpy(row_starts, mat.row_starts.data(), mat.row_starts.size() * sizeof(int), cudaMemcpyHostToDevice))
+    CHECK_CUSPARSE(cusparseCreateCsr(&descr, mat.row_size(), mat.col_size(), mat.nnz(),
+          row_starts, cols, weights,
+          CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I,
+          CUSPARSE_INDEX_BASE_ZERO, CUDA_R_64F))
   }
-  CHECK_CUDA(cudaMalloc((void**)&result.weights, nnzb * block_dim * block_dim * sizeof(double)))
-  CHECK_CUDA(cudaMalloc((void**)&result.cols, nnzb *  sizeof(int)))
-  CHECK_CUSPARSE(cusparseDcsr2bsr(context.handle.get(), CUSPARSE_DIRECTION_ROW, mat.row_size(), mat.col_size(),
-      csr_descr.get(), csr_weights, csr_row_starts, csr_cols, block_dim,
-      result.descr.get(), result.weights, result.row_starts, result.cols))
-  CHECK_CUDA(cudaStreamSynchronize(context.stream.get()))
+  ~CSRMatDev() {
+    CHECK_CUSPARSE(cusparseDestroySpMat(descr))
+    CHECK_CUDA(cudaFree(weights))
+    CHECK_CUDA(cudaFree(cols))
+    CHECK_CUDA(cudaFree(row_starts))
+  }
+  double *weights;
+  int *cols;
+  int *row_starts;
+  cusparseSpMatDescr_t descr;
+};
 
-  result.mb = mb;
-  result.nb = (mat.col_size() + block_dim - 1) / block_dim;
-  result.nnzb = nnzb;
-  result.block_size = block_dim;
-  CHECK_CUDA(cudaFree(csr_weights));
-  CHECK_CUDA(cudaFree(csr_cols));
-  CHECK_CUDA(cudaFree(csr_row_starts));
-  return result;
-}
+struct DnVec {
+  explicit DnVec(const std::vector<double>& v) : length(v.size()) {
+    CHECK_CUDA(cudaMalloc((void**)&data, length * sizeof(double)))
+    CHECK_CUDA(cudaMemcpy(data, v.data(), length * sizeof(double), cudaMemcpyHostToDevice))
+    CHECK_CUSPARSE(cusparseCreateDnVec(&descr, length, data, CUDA_R_64F))
+  }
+  explicit DnVec(size_t length) : length(length) {
+    CHECK_CUDA(cudaMalloc((void**)&data, length * sizeof(double)))
+    CHECK_CUDA(cudaMemset(data, 0, length * sizeof(double)))
+    CHECK_CUSPARSE(cusparseCreateDnVec(&descr, length, data, CUDA_R_64F))
+  }
+  ~DnVec() {
+    CHECK_CUSPARSE(cusparseDestroyDnVec(descr))
+    CHECK_CUDA(cudaFree(data))
+  }
+  size_t size() const { return length; }
+  size_t length;
+  double *data;
+  cusparseDnVecDescr_t descr;
+};
 
-__global__ void sub(double* y, const double* b, size_t n) {
+__global__ void sub(const double *src1, const double *src2, double *dst, size_t n) {
   const size_t stride = blockDim.x * gridDim.x;
   const size_t index = threadIdx.x + blockIdx.x * blockDim.x;
   for (size_t i = index; i < n; i += stride) {
-    y[i] -= b[i];
+    dst[i] = src1[i] - src2[i];
   }
 }
 
-void solve(const CSRMat& mat, const std::vector<double>& b, std::vector<double>& x, const Context& context) {
-  const auto dev_mat = convert_to_dev(mat, context);
-  const auto mat_tr = transpose(mat);
-  const auto dev_mat_tr = convert_to_dev(mat_tr, context);
-  double* dev_x;
-  CHECK_CUDA(cudaMalloc((void**)&dev_x, x.size() * sizeof(double)))
-  CHECK_CUDA(cudaMemcpy(dev_x, x.data(), x.size() * sizeof(double), cudaMemcpyHostToDevice))
-  double* dev_b;
-  CHECK_CUDA(cudaMalloc((void**)&dev_b, b.size() * sizeof(double)))
-  CHECK_CUDA(cudaMemcpy(dev_b, b.data(), b.size() * sizeof(double), cudaMemcpyHostToDevice))
-  double* dev_y;
-  CHECK_CUDA(cudaMalloc((void**)&dev_y, b.size() * sizeof(double)))
-  std::vector<double> y(b.size());
-
-  double alpha_forward = 1.0;
-  double beta_forward = 0.0;
-  double alpha_backward = -3e-7;
-  double beta_backward = 1.0;
-  for (size_t i = 0; i < 100000; ++i) {
-    CHECK_CUSPARSE(cusparseDbsrmv(context.handle.get(),
-        CUSPARSE_DIRECTION_ROW,
-        CUSPARSE_OPERATION_NON_TRANSPOSE,
-        dev_mat.mb,
-        dev_mat.nb,
-        dev_mat.nnzb,
-        &alpha_forward,
-        dev_mat.descr.get(),
-        dev_mat.weights,
-        dev_mat.row_starts,
-        dev_mat.cols,
-        dev_mat.block_size,
-        dev_x,
-        &beta_forward,
-        dev_y
-    ))
-    sub<<<128, 128, 0, context.stream.get()>>>(dev_y, dev_b, b.size());
-    CHECK_CUDA(cudaMemcpyAsync(y.data(), dev_y, b.size() * sizeof(double), cudaMemcpyDeviceToHost, context.stream.get()));
-    CHECK_CUSPARSE(cusparseDbsrmv(context.handle.get(),
-        CUSPARSE_DIRECTION_ROW,
-        CUSPARSE_OPERATION_NON_TRANSPOSE,
-        dev_mat_tr.mb,
-        dev_mat_tr.nb,
-        dev_mat_tr.nnzb,
-        &alpha_backward,
-        dev_mat_tr.descr.get(),
-        dev_mat_tr.weights,
-        dev_mat_tr.row_starts,
-        dev_mat_tr.cols,
-        dev_mat_tr.block_size,
-        dev_y,
-        &beta_backward,
-        dev_x
-    ))
-    CHECK_CUDA(cudaStreamSynchronize(context.stream.get()))
-    double l1 = 0.0;
-    for (auto&& e : y) {
-      l1 += abs(e);
-    }
-    l1 /= y.size();
-    if (i % 100 == 0) std::cerr << i << " " << l1 << std::endl;
+__global__ void fma_sc(const double src1, const double *src2, double *dst, size_t n) {
+  const size_t stride = blockDim.x * gridDim.x;
+  const size_t index = threadIdx.x + blockIdx.x * blockDim.x;
+  for (size_t i = index; i < n; i += stride) {
+    dst[i] += src1 * src2[i];
   }
+}
+
+__global__ void fma4_sc(const double src1, const double *src2, const double *acc, double *dst, size_t n) {
+  const size_t stride = blockDim.x * gridDim.x;
+  const size_t index = threadIdx.x + blockIdx.x * blockDim.x;
+  for (size_t i = index; i < n; i += stride) {
+    dst[i] = src1 * src2[i] + acc[i];
+  }
+}
+
+__global__ void accum_l2(double* buf_acc, const double* v, size_t n) {
+  const size_t stride = blockDim.x * gridDim.x;
+  const size_t index = threadIdx.x + blockIdx.x * blockDim.x;
+  double result = 0.0;
+  for (size_t i = index; i < n; i += stride) {
+    result += v[i] * v[i];
+  }
+  buf_acc[index] = result;
+}
+
+__global__ void accum_l1(double* l1_acc, const double* y, size_t n) {
+  const size_t stride = blockDim.x * gridDim.x;
+  const size_t index = threadIdx.x + blockIdx.x * blockDim.x;
+  double result = 0.0;
+  for (size_t i = index; i < n; i += stride) {
+    result += abs(y[i]);
+  }
+  l1_acc[index] = result;
+}
+
+void solve_impl(const Context& context, CSRMatDev& mat, const CSRMatDev& mat_tr, const DnVec& a, const DnVec& b) {
+  double alpha = 1.0;
+  double beta = 0.0;
+  auto external_buffer = [&] {
+    size_t bufsize_forward = 0, bufsize_backward = 0;
+    CHECK_CUSPARSE(cusparseSpMV_bufferSize(context.handle.get(), CUSPARSE_OPERATION_NON_TRANSPOSE,
+          &alpha,
+          mat.descr,
+          a.descr,
+          &beta,
+          b.descr,
+          CUDA_R_64F,
+          CUSPARSE_SPMV_CSR_ALG1,
+          &bufsize_forward))
+    CHECK_CUSPARSE(cusparseSpMV_bufferSize(context.handle.get(), CUSPARSE_OPERATION_NON_TRANSPOSE,
+          &alpha,
+          mat_tr.descr,
+          b.descr,
+          &beta,
+          a.descr,
+          CUDA_R_64F,
+          CUSPARSE_SPMV_CSR_ALG1,
+          &bufsize_backward))
+    const size_t bufsize = std::max(bufsize_forward, bufsize_backward);
+    void *buf;
+    CHECK_CUDA(cudaMalloc(&buf, bufsize))
+    return buf;
+  }();
+  auto spmv_non_trans = [&] (auto&& v_in, auto&& v_out) {
+    CHECK_CUSPARSE(cusparseSpMV(context.handle.get(), CUSPARSE_OPERATION_NON_TRANSPOSE,
+          &alpha,
+          mat.descr,
+          v_in.descr,
+          &beta,
+          v_out.descr,
+          CUDA_R_64F,
+          CUSPARSE_SPMV_CSR_ALG1,
+          external_buffer))
+  };
+  auto spmv_trans = [&] (auto&& v_in, auto&& v_out) {
+    CHECK_CUSPARSE(cusparseSpMV(context.handle.get(), CUSPARSE_OPERATION_NON_TRANSPOSE,
+          &alpha,
+          mat_tr.descr,
+          v_in.descr,
+          &beta,
+          v_out.descr,
+          CUDA_R_64F,
+          CUSPARSE_SPMV_CSR_ALG1,
+          external_buffer))
+  };
+  auto sub_vec = [&] (auto&& src1, auto&& src2, auto&& dst) {
+    sub<<<1024, 256, 0, context.stream.get()>>>(src1.data, src2.data, dst.data, dst.size());
+  };
+  auto fma_sc_vec = [&] (double src1, auto&& src2, auto&& dst) {
+    fma_sc<<<1024, 256, 0, context.stream.get()>>>(src1, src2.data, dst.data, dst.size());
+  };
+  auto fma4_sc_vec = [&] (double src1, auto&& src2, auto&& acc, auto&& dst) {
+    fma4_sc<<<1024, 256, 0, context.stream.get()>>>(src1, src2.data, acc.data, dst.data, dst.size());
+  };
+  double* buf_acc;
+  CHECK_CUDA(cudaMallocManaged((void**)&buf_acc, 1024 * sizeof(double)))
+  auto l1_norm = [&] (auto&& v) {
+    accum_l1<<<8, 128, 0, context.stream.get()>>>(buf_acc, v.data, v.size()); 
+    CHECK_CUDA(cudaStreamSynchronize(context.stream.get()))
+    double sum = 0.0;
+    for (size_t i = 0; i < 1024; ++i) {
+      sum += buf_acc[i];
+    }
+    return sum;
+  };
+  auto l2_norm = [&] (auto&& v) {
+    accum_l2<<<8, 128, 0, context.stream.get()>>>(buf_acc, v.data, v.size()); 
+    CHECK_CUDA(cudaStreamSynchronize(context.stream.get()))
+    double sum = 0.0;
+    for (size_t i = 0; i < 1024; ++i) {
+      sum += buf_acc[i];
+    }
+    return sum;
+  };
+
+  DnVec pa(b.size());
+  spmv_non_trans(a, pa);
+  DnVec r(b.size());
+  sub_vec(b, pa, r);
+  DnVec p(a.size());
+  spmv_trans(r, p);
+  DnVec s(a.size());
+  CHECK_CUDA(cudaMemcpyAsync(s.data, p.data, s.size() * sizeof(double), cudaMemcpyDeviceToDevice, context.stream.get()))
+  double old_s_norm = l2_norm(s);
+  DnVec q(b.size());
+
+  for (size_t i = 0; i < 300; ++i) {
+    spmv_non_trans(p, q);
+    const auto alpha = old_s_norm / l2_norm(q);
+    fma_sc_vec(alpha, p, a);
+    fma_sc_vec(-alpha, q, r);
+    spmv_trans(r, s);
+    const auto new_s_norm = l2_norm(s);
+    if (i % 10 == 0) {
+      double l1 = l1_norm(r) / r.size();
+      std::cerr << i << " " << l1 << std::endl;
+    }
+    if (new_s_norm < 1.0) {
+      break;
+    }
+    const auto beta = new_s_norm / old_s_norm;
+    fma4_sc_vec(beta, p, s, p);
+    old_s_norm = new_s_norm;
+  }
+  CHECK_CUDA(cudaStreamSynchronize(context.stream.get()))
+  cudaFree(external_buffer);
+  cudaFree(buf_acc);
+}
+
+void solve(const Context& context, const CSRMat& mat, std::vector<double>& a, const std::vector<double>& b) {
+  CSRMatDev dev_mat(mat);
+  const auto dev_mat_tr = [&] {
+    const auto mat_tr = transpose(mat);
+    return CSRMatDev(mat_tr);
+  }();
+  DnVec dev_a(a);
+  DnVec dev_b(b);
+  solve_impl(context, dev_mat, dev_mat_tr, dev_a, dev_b);
+  CHECK_CUDA(cudaMemcpyAsync(a.data(), dev_a.data, a.size() * sizeof(double), cudaMemcpyDeviceToHost, context.stream.get()))
 }
 
 int main(int argc, char** argv) {
@@ -386,7 +354,6 @@ int main(int argc, char** argv) {
 
   PatternIndexer indexer(config.masks);
   size_t vec_len = indexer.pattern_size() + 3 + 1; // pattern, global(3), constant(1)
-  while (vec_len % block_dim != 0) ++vec_len;
   std::vector<double> vec(vec_len);
   for (size_t mid = param.from; mid <= param.to; ++mid) {
     std::cerr << mid << std::endl;
@@ -404,8 +371,8 @@ int main(int argc, char** argv) {
     for (auto&& state : filtered) {
       scores.push_back(state.score);
     }
-    while (scores.size() % block_dim != 0) scores.push_back(0.0);
-    solve(mat, scores, vec, context);
+    scores.push_back(0.0); // L2 normalization
+    solve(context, mat, vec, scores);
     //std::ofstream ofs(param.output_path + "/weight_" + std::to_string(mid));
     //for (auto&& w : vec) {
     //  ofs << w << "\n";
