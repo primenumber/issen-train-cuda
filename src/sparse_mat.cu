@@ -95,7 +95,6 @@ CSRMat transpose(const CSRMat& mat) {
   }
   std::vector<int> row_starts(mat.col_size() + 1);
   std::partial_sum(std::begin(count), std::end(count), std::begin(row_starts) + 1);
-  std::cerr << row_starts.back() << std::endl;
   std::vector<int> offsets(mat.col_size());
   for (size_t i = 0; i < mat.col_size(); ++i) {
     offsets[i] = row_starts[i];
