@@ -1,12 +1,17 @@
 SRCS:=src/main.cu src/sparse_mat.cu
 OBJS:=$(SRCS:%.cu=%.o)
-NVCCOPT:=-O2 -std=c++17 -lcusparse -Xcompiler='-march=native -Wall -Wextra -fopenmp'
+NVCCFLAGS:=-O2 -std=c++17 -Xcompiler='-march=native -Wall -Wextra -fopenmp'
+NVCC_LINK_FLAGS:=-lcusparse_static -lculibos
 
 train: $(OBJS)
-	nvcc -o $@ $(NVCCOPT) $^
+	nvcc -o $@ $(NVCCFLAGS) $(NVCC_LINK_FLAGS) $^
 
 %.o: %.cu
-	nvcc -c -o $@ $(NVCCOPT) $<
+	nvcc -c -o $@ $(NVCCFLAGS) $<
 
-main.o: bitboard.hpp sparse_mat.hpp
-sparse_mat.o: bitboard.hpp sparse_mat.hpp
+main.o: src/bitboard.hpp src/sparse_mat.hpp
+sparse_mat.o: src/bitboard.hpp src/sparse_mat.hpp
+
+.PHONY: clean
+clean: $(OBJS) train
+	-rm $^
