@@ -18,7 +18,7 @@ inline uint64_t parallel_extract(uint64_t src, uint64_t mask) {
 }
 
 inline int pop_count(uint64_t src) {
-#ifdef __POPC__
+#ifdef __POPCNT__
   return _popcnt64(src);
 #else
   int result = 0;
