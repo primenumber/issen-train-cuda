@@ -387,16 +387,22 @@ void solve(const Context& context, const CSRMat& mat, std::vector<double>& a, co
 
 int main(int argc, char** argv) {
   const auto param = parse_options(argc, argv);
-  const auto config = load_config(param.config_path);
-  const auto data_set = load_dataset(param.input_path);
 
+  std::cerr << "Loading config" << std::endl;
+  const auto config = load_config(param.config_path);
+
+  std::cerr << "Setting up environment" << std::endl;
   cudaSetDeviceFlags(cudaDeviceScheduleBlockingSync);
   Context context;
   CHECK_CUSPARSE(cusparseSetStream(context.handle.get(), context.stream.get()))
 
+  std::cerr << "Loading dataset" << std::endl;
+  const auto data_set = load_dataset(param.input_path);
+
   PatternIndexer indexer(config.masks);
   size_t vec_len = indexer.pattern_size() + 3 + 1; // pattern, global(3), constant(1)
   std::vector<double> vec(vec_len);
+  std::cerr << "Solving..." << std::endl;
   for (size_t mid = param.from; mid <= param.to; ++mid) {
     std::cerr << mid << std::endl;
     const size_t lower = mid - param.width + 1;
