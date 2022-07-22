@@ -32,8 +32,8 @@ PatternIndexer::PatternIndexer(const std::vector<uint64_t>& masks) : masks(masks
 }
 
 std::tuple<std::vector<double>, std::vector<int>, double> generate_row(const State& state, const PatternIndexer& indexer) {
-  std::vector<std::pair<int, double>> elements;
-  elements.reserve(indexer.mask_size() * 8);
+  std::vector<int> indices;
+  indices.reserve(indexer.mask_size() * 8);
   for (size_t id = 0; id < indexer.mask_size(); ++id) {
     auto player = state.player;
     auto opponent = state.opponent;
@@ -42,30 +42,27 @@ std::tuple<std::vector<double>, std::vector<int>, double> generate_row(const Sta
       const auto opponent_v = bitboard::flip_vertical(opponent);
       auto index = indexer.get_index(id, player, opponent);
       auto index_v = indexer.get_index(id, player_v, opponent_v);
-      elements.push_back({index, 1.0});
-      elements.push_back({index_v, 1.0});
+      indices.push_back(index);
+      indices.push_back(index_v);
       player = bitboard::rot90(player);
       opponent = bitboard::rot90(opponent);
     }
   }
-  std::sort(std::begin(elements), std::end(elements));
-  std::vector<std::pair<int, double>> compressed;
-  compressed.reserve(indexer.mask_size() * 8);
-  for (auto&& [index, weight] : elements) {
-    if (compressed.empty()) compressed.emplace_back(index, weight);
-    else if (compressed.back().first == index) {
-      compressed.back().second += weight;
-    } else {
-      compressed.emplace_back(index, weight);
-    }
-  }
+  std::sort(std::begin(indices), std::end(indices));
   std::vector<double> weights;
   std::vector<int> cols;
-  weights.reserve(compressed.size()+4);
-  cols.reserve(compressed.size()+4);
-  for (auto&& [index, weight] : compressed) {
-    weights.push_back(weight);
-    cols.push_back(index);
+  weights.reserve(indexer.mask_size() * 8);
+  cols.reserve(indexer.mask_size() * 8);
+  for (auto&& index : indices) {
+    if (cols.empty()) {
+      cols.emplace_back(index);
+      weights.emplace_back(1.0);
+    } else if (cols.back() == index) {
+      weights.back() += 1.0;
+    } else {
+      cols.emplace_back(index);
+      weights.emplace_back(1.0);
+    }
   }
   auto player = state.player;
   auto opponent = state.opponent;
@@ -83,31 +80,35 @@ std::tuple<std::vector<double>, std::vector<int>, double> generate_row(const Sta
 }
 
 std::pair<CSRMat, std::vector<double>> generate_matrix(const DataSet& data_set, const PatternIndexer& indexer) {
-  CSRMat mat;
-  std::vector<double> vec;
-  mat.col_size_ = indexer.pattern_size() + 3 + 1;
-  mat.row_starts.reserve(std::size(data_set) + 2);
-  mat.cols.reserve((indexer.mask_size() * 8 + 4) * std::size(data_set) + mat.col_size_);
-  mat.weights.reserve((indexer.mask_size() * 8 + 4) * std::size(data_set) + mat.col_size_);
-  mat.row_starts.push_back(0);
-  std::mutex mtx;
+  const size_t col_size = indexer.pattern_size() + 3 + 1;  // pattern, global (3), constant (1)
+  const size_t row_size = std::size(data_set) + 1; // dataset, l2 norm (1)
+  std::vector<size_t> row_nnz(row_size);
 #pragma omp parallel for
   for (size_t i = 0; i < std::size(data_set); ++i) {
     const auto [weights, cols, score] = generate_row(data_set[i], indexer);
-    {
-      std::lock_guard lock(mtx);
-      mat.weights.insert(std::end(mat.weights), std::begin(weights), std::end(weights));
-      mat.cols.insert(std::end(mat.cols), std::begin(cols), std::end(cols));
-      mat.row_starts.push_back(std::size(mat.weights));
-      vec.push_back(score);
-    }
+    row_nnz[i] = std::size(weights);
+  }
+  row_nnz.back() = col_size;
+  CSRMat mat;
+  mat.row_starts.resize(row_size + 1);
+  mat.col_size_ = col_size;
+  std::partial_sum(std::begin(row_nnz), std::end(row_nnz), std::begin(mat.row_starts) + 1);
+  const size_t nnz = mat.row_starts.back();
+  mat.cols.resize(nnz);
+  mat.weights.resize(nnz);
+  std::vector<double> vec(row_size);
+#pragma omp parallel for
+  for (size_t i = 0; i < std::size(data_set); ++i) {
+    const auto [weights, cols, score] = generate_row(data_set[i], indexer);
+    size_t from = mat.row_starts[i];
+    std::copy(std::begin(weights), std::end(weights), std::begin(mat.weights) + from);
+    std::copy(std::begin(cols), std::end(cols), std::begin(mat.cols) + from);
+    vec[i] = score;
   }
   // L2 normalization
-  for (size_t i = 0; i < mat.col_size_; ++i) {
-    mat.weights.push_back(1.0);
-    mat.cols.push_back(i);
-  }
-  mat.row_starts.push_back(std::size(mat.weights));
-  vec.push_back(0);
+  const size_t from = mat.row_starts[row_size - 1];
+  std::fill(std::begin(mat.weights) + from, std::end(mat.weights), 1.0);
+  std::iota(std::begin(mat.cols) + from, std::end(mat.cols), 0);
+  vec.back() = 0;
   return {std::move(mat), std::move(vec)};
 }
