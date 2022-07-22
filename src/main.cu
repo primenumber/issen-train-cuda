@@ -356,6 +356,7 @@ void solve_impl(const Context& context, const CSRMatDev& mat, const CSRMatDev& m
   CHECK_CUDA(cudaMemcpyAsync(s.data, p.data, s.size() * sizeof(double), cudaMemcpyDeviceToDevice, context.stream.get()))
   double old_s_norm = l2_norm(s);
   DnVec q(b.size());
+  DnVec r2(b.size());
 
   for (size_t i = 0; i < 300; ++i) {
     spmv_non_trans(p, q);
@@ -365,7 +366,9 @@ void solve_impl(const Context& context, const CSRMatDev& mat, const CSRMatDev& m
     spmv_trans(r, s);
     const auto new_s_norm = l2_norm(s);
     if (i % 10 == 0) {
-      double l1 = l1_norm(r) / r.size();
+      spmv_non_trans(a, pa);
+      sub_vec(b, pa, r2);
+      double l1 = l1_norm(r2) / r2.size();
       std::cerr << i << " " << l1 << std::endl;
     }
     if (new_s_norm < 1.0) {
