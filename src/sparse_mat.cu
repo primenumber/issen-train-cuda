@@ -81,14 +81,16 @@ std::tuple<std::vector<double>, std::vector<int>, double> generate_row(const Sta
 
 std::pair<CSRMat, std::vector<double>> generate_matrix(const DataSet& data_set, const PatternIndexer& indexer) {
   const size_t col_size = indexer.pattern_size() + 3 + 1;  // pattern, global (3), constant (1)
-  const size_t row_size = std::size(data_set) + 1; // dataset, l2 norm (1)
+  const size_t row_size = std::size(data_set) + col_size; // dataset, l2 norm (col_size)
   std::vector<size_t> row_nnz(row_size);
 #pragma omp parallel for
   for (size_t i = 0; i < std::size(data_set); ++i) {
     const auto [weights, cols, score] = generate_row(data_set[i], indexer);
     row_nnz[i] = std::size(weights);
   }
-  row_nnz.back() = col_size;
+  for (size_t i = 0; i < col_size; ++i) {
+    row_nnz[i + std::size(data_set)] = 1;
+  }
   CSRMat mat;
   mat.row_starts.resize(row_size + 1);
   mat.col_size_ = col_size;
@@ -106,9 +108,9 @@ std::pair<CSRMat, std::vector<double>> generate_matrix(const DataSet& data_set, 
     vec[i] = score;
   }
   // L2 normalization
-  const size_t from = mat.row_starts[row_size - 1];
+  const size_t from = mat.row_starts[std::size(data_set)];
   std::fill(std::begin(mat.weights) + from, std::end(mat.weights), 1.0);
   std::iota(std::begin(mat.cols) + from, std::end(mat.cols), 0);
-  vec.back() = 0;
+  std::fill(std::begin(vec) + std::size(data_set), std::end(vec), 0.0);
   return {std::move(mat), std::move(vec)};
 }
