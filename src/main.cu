@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <charconv>
 #include <chrono>
 #include <fstream>
 #include <iostream>
@@ -71,11 +72,22 @@ DataSet load_dataset(const std::string& input_path) {
   ifs >> length;
   DataSet result;
   result.reserve(length);
+  std::string line;
   for (size_t i = 0; i < length; ++i) {
-    uint64_t player, opponent;
-    int32_t score;
-    uint32_t best_pos;
-    ifs >> std::hex >> player >> opponent >> std::dec >> score >> best_pos;
+    getline(ifs, line);
+    uint64_t player = 0, opponent = 0;
+    int32_t score = 0;
+    const char* ptr = line.data();
+    const char* ptr_end = line.data() + line.size();
+    {
+      auto [next_ptr, ec] = std::from_chars(ptr, ptr_end, player, 16);
+      ptr = ++next_ptr;
+    }
+    {
+      auto [next_ptr, ec] = std::from_chars(ptr, ptr_end, opponent, 16);
+      ptr = ++next_ptr;
+    }
+    std::from_chars(ptr, ptr_end, score, 10);
     result.push_back({player, opponent, score});
   }
   return result;
