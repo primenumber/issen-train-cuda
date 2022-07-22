@@ -369,7 +369,8 @@ void solve_impl(const Context& context, const CSRMatDev& mat, const CSRMatDev& m
       spmv_non_trans(a, pa);
       sub_vec(b, pa, r2);
       double l1 = l1_norm(r2) / r2.size();
-      std::cerr << i << " " << l1 << std::endl;
+      double l2 = l2_norm(r2) / r2.size();
+      std::cerr << i << " " << l1 << " " << l2 << std::endl;
     }
     if (new_s_norm < 1.0) {
       break;
